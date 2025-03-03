@@ -3,16 +3,16 @@ package alt
 import (
 	"encoding/json"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/samber/oops"
 	bolt "go.etcd.io/bbolt"
-	"golang.org/x/xerrors"
 
 	"github.com/aquasecurity/trivy-db/pkg/db"
+	"github.com/aquasecurity/trivy-db/pkg/log"
 	"github.com/aquasecurity/trivy-db/pkg/types"
 	ustrings "github.com/aquasecurity/trivy-db/pkg/utils/strings"
 	"github.com/aquasecurity/trivy-db/pkg/vulnsrc/vulnerability"
@@ -33,11 +33,13 @@ var (
 
 type VulnSrc struct {
 	dbc db.Operation
+	logger *log.Logger
 }
 
 func NewVulnSrc() VulnSrc {
 	return VulnSrc{
 		dbc: db.Config{},
+		logger: log.WithPrefix("alt"),
 	}
 }
 
@@ -46,19 +48,20 @@ func (vs VulnSrc) Name() types.SourceID {
 }
 
 func (vs VulnSrc) Update(dir string) error {
-	root := filepath.Join(dir, "vuln-list-alt", "oval")
+	rootDir := filepath.Join(dir, "vuln-list-alt", "oval")
+	eb := oops.In("alt").With("root_dir", rootDir)
 
-	branches, err := getBranches(root)
+	branches, err := getBranches(rootDir)
 	if err != nil {
-		return err
+		return eb.Wrap(err)
 	}
 
 	advisories := map[bucket]AdvisorySpecial{}
 
 	for _, branch := range branches {
-		log.Printf("Parsing %s", branch.Name())
+		vs.logger.Info("Parsing branch", log.String("name", branch.Name()))
 
-		branchDir := filepath.Join(root, branch.Name())
+		branchDir := filepath.Join(rootDir, branch.Name())
 
 		products, err := getProducts(branchDir)
 		if err != nil {
@@ -68,7 +71,7 @@ func (vs VulnSrc) Update(dir string) error {
 		for _, f := range products {
 			definitions, err := parseOVAL(filepath.Join(branchDir, f.Name()))
 			if err != nil {
-				return xerrors.Errorf("failed to parse product OVAL: %w", err)
+				return eb.Wrapf(err, "failed to parse product OVAL")
 			}
 
 			advisories = vs.mergeAdvisories(advisories, definitions)
@@ -77,41 +80,34 @@ func (vs VulnSrc) Update(dir string) error {
 	}
 
 	if err = vs.putVendorCVEs(); err != nil {
-		return xerrors.Errorf("put vendor cve error: %s", err)
+		return eb.Wrapf(err, "put vendor cve error")
 	}
 
 	if err = vs.save(advisories); err != nil {
-		return xerrors.Errorf("save error: %w", err)
+		return eb.Wrapf(err, "save error")
 	}
 
 	return nil
 }
 
 func getBranches(dir string) ([]fs.DirEntry, error) {
-	branches, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, xerrors.Errorf("failed to get directory branch list: %w", err)
-	}
-	return branches, nil
+	return os.ReadDir(dir)
 }
 
 func getProducts(dir string) ([]fs.DirEntry, error) {
-	products, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, xerrors.Errorf("failed to get directory products list: %w", err)
-	}
-	return products, nil
+	return os.ReadDir(dir)
 }
 
 func parseOVAL(dir string) (map[bucket]DefinitionSpecial, error) {
+	eb := oops.In("alt").With("file", dir)
 	tests, err := resolveTests(dir)
 	if err != nil {
-		return nil, err
+		return nil, eb.Wrap(err)
 	}
 
 	definitions, err := parseDefinitions(dir)
 	if err != nil {
-		return nil, err
+		return nil, eb.Wrap(err)
 	}
 
 	defs := map[bucket]DefinitionSpecial{}
@@ -250,21 +246,21 @@ func (vs VulnSrc) mergeAdvisories(advisories map[bucket]AdvisorySpecial, defs ma
 func (vs VulnSrc) save(advisories map[bucket]AdvisorySpecial) error {
 	err := vs.dbc.BatchUpdate(func(tx *bolt.Tx) error {
 		if err := vs.dbc.PutDataSource(tx, rootBucket, source); err != nil {
-			return xerrors.Errorf("failed to put data source: %w", err)
+			return oops.Wrapf(err, "failed to put data source")
 		}
 		for bkt, advisory := range advisories {
 			if err := vs.dbc.PutAdvisoryDetail(tx, bkt.vulnerabilityID, bkt.packageName, []string{rootBucket}, advisory); err != nil {
-				return xerrors.Errorf("failed to save ALT OVAL advisory: %w", err)
+				return oops.Wrapf(err, "failed to save ALT OVAL advisory")
 			}
 
 			if err := vs.dbc.PutVulnerabilityID(tx, bkt.vulnerabilityID); err != nil {
-				return xerrors.Errorf("failed to put severity: %w", err)
+				return oops.Wrapf(err, "failed to put severity")
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return xerrors.Errorf("batch update error: %w", err)
+		return oops.Wrapf(err, "batch update error")
 	}
 	return nil
 }
@@ -280,11 +276,12 @@ func vendorCVE(metadata Metadata) CVEEntry {
 }
 
 func (vs VulnSrc) putVendorCVEs() error {
+	eb := oops.In("alt").With("operation", "putVendorCVEs")
 	err := vs.dbc.BatchUpdate(func(tx *bolt.Tx) error {
 		for _, cve := range vendorCVEs {
 			err := vs.putVendorVulnerabilityDetail(tx, cve)
 			if err != nil {
-				return err
+				return eb.Wrap(err)
 			}
 		}
 		return nil
@@ -305,19 +302,21 @@ func (vs VulnSrc) putVendorVulnerabilityDetail(tx *bolt.Tx, cve VendorCVE) error
 	}
 
 	if err := vs.dbc.PutVulnerabilityDetail(tx, cve.CVE.ID, vulnerability.ALT, vuln); err != nil {
-		return xerrors.Errorf("failed to save ALT Vendor vulnerability: %w", err)
+		return oops.Wrapf(err, "failed ro dave ALT Vendoe vulnerability")
 	}
 
 	if err := vs.dbc.PutVulnerabilityID(tx, cve.CVE.ID); err != nil {
-		return xerrors.Errorf("failed to save the vulnerability ID: %w", err)
+		return oops.Wrapf(err, "failed to save the vulnerability ID")
 	}
 	return nil
 }
 
 func (vs VulnSrc) Get(pkgName, cpe string) ([]types.Advisory, error) {
+	eb := oops.In("alt").With("package_name", pkgName).With("cpe", cpe)
+
 	rawAdvisories, err := vs.dbc.ForEachAdvisory([]string{rootBucket}, pkgName)
 	if err != nil {
-		return nil, xerrors.Errorf("unable to iterate advisories: %w", err)
+		return nil, eb.Wrapf(err, "unable to iterate advisories")
 	}
 
 	var advisories []types.Advisory
@@ -328,7 +327,7 @@ func (vs VulnSrc) Get(pkgName, cpe string) ([]types.Advisory, error) {
 
 		var adv AdvisorySpecial
 		if err = json.Unmarshal(v.Content, &adv); err != nil {
-			return nil, xerrors.Errorf("failed to unmarshal advisory JSON: %w", err)
+			return nil, eb.Wrapf(err, "failed to unmarshal advisory JSON")
 		}
 
 		for _, entry := range adv.Entries {
