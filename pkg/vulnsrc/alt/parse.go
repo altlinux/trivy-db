@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/xerrors"
+	"github.com/samber/oops"
 )
 
 type resolvedTest struct {
@@ -16,14 +16,16 @@ type resolvedTest struct {
 }
 
 func unmarshalJSONFile(v interface{}, fileName string) error {
+	eb := oops.With("file_path", fileName)
+
 	f, err := os.Open(fileName)
 	if err != nil {
-		return xerrors.Errorf("unable to open a file (%s): %w", fileName, err)
+		return eb.Wrapf(err, "unable to open a file")
 	}
 	defer f.Close()
 
 	if err = json.NewDecoder(f).Decode(v); err != nil {
-		return xerrors.Errorf("failed to decode ALT OVAL JSON: %w", err)
+		return eb.Wrapf(err, "failed to decode ALT OVAL JSON")
 	}
 	return nil
 }
@@ -31,7 +33,7 @@ func unmarshalJSONFile(v interface{}, fileName string) error {
 func parseObjects(dir string) (map[string]RPMInfoObject, error) {
 	var objects Objects
 	if err := unmarshalJSONFile(&objects, filepath.Join(dir, "objects.json")); err != nil {
-		return nil, xerrors.Errorf("failed to unmarshal objects: %w", err)
+		return nil, oops.Wrapf(err, "failed to unmarshal objects")
 	}
 
 	objs := map[string]RPMInfoObject{}
@@ -45,7 +47,7 @@ func parseObjects(dir string) (map[string]RPMInfoObject, error) {
 func parseStates(dir string) (map[string]RPMInfoState, error) {
 	var ss States
 	if err := unmarshalJSONFile(&ss, filepath.Join(dir, "states.json")); err != nil {
-		return nil, xerrors.Errorf("failed to unmarshal states: %w", err)
+		return nil, oops.Wrapf(err, "failed to unmarshal states")
 	}
 
 	states := map[string]RPMInfoState{}
@@ -58,7 +60,7 @@ func parseStates(dir string) (map[string]RPMInfoState, error) {
 func parseTests(dir string) (Tests, error) {
 	var tests Tests
 	if err := unmarshalJSONFile(&tests, filepath.Join(dir, "tests.json")); err != nil {
-		return Tests{}, xerrors.Errorf("failed to unmarshal tests: %w", err)
+		return Tests{}, oops.Wrapf(err, "failed to unmarshal tests")
 	}
 
 	return tests, nil
@@ -95,7 +97,7 @@ func parseDefinitions(dir string) (Definitions, error) {
 	var definitions Definitions
 
 	if err := unmarshalJSONFile(&definitions, filepath.Join(dir, "definitions.json")); err != nil {
-		return Definitions{}, xerrors.Errorf("failed to parse definitions: %w", err)
+		return Definitions{}, oops.Wrapf(err, "failed to parse definitions")
 	}
 	return definitions, nil
 }
@@ -110,8 +112,9 @@ func followTestRefs(test RPMInfoTest, objects map[string]RPMInfoObject, states m
 
 	obj, ok := objects[test.Object.ObjectRef]
 	if !ok {
-		return t, xerrors.Errorf("invalid tests data, can't find object ref: %s, test ref: %s",
-			test.Object.ObjectRef, test.ID)
+		return t, oops.With("object_ref", test.Object.ObjectRef).
+			With("test_ref", test.ID).
+			Errorf("invalid tests data, can't find object reference")
 	}
 	t.Name = obj.Name
 
@@ -122,8 +125,9 @@ func followTestRefs(test RPMInfoTest, objects map[string]RPMInfoObject, states m
 
 	state, ok := states[test.State.StateRef]
 	if !ok {
-		return t, xerrors.Errorf("invalid tests data, can't find ovalstate ref %s, test ref: %s",
-			test.State.StateRef, test.ID)
+		return t, oops.With("state_ref", test.State.StateRef).
+			With("test_ref", test.ID).
+			Errorf("invalid tests data, can't find OVAL state reference")
 	}
 
 	if state.Arch.Datatype == "string" && (state.Arch.Operation == "pattern match" || state.Arch.Operation == "equals") {
